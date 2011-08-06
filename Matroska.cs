@@ -774,7 +774,8 @@ namespace Rnd.Matroska
                 if (id == 0x4dbb)
                 {
                     int size = (int)EBML.ReadSize (m_map);
-                    ParseMetaseekData (LocalStream (size));
+                    using (var input = LocalStream (size))
+                        ParseMetaseekData (input);
                     return true;
                 }
                 return false;
@@ -791,42 +792,44 @@ namespace Rnd.Matroska
                 Console.WriteLine (".. segment info [{0} bytes]", info_size);
 
             StreamReserve (info_size);
-            var input = LocalStream ((int)info_size);
-            MkvSegment segment = m_segments[0];
-
-            int octet;
-            while ((octet = input.ReadByte()) != -1)
+            using (var input = LocalStream ((int)info_size))
             {
-                uint id = EBML.ReadID (input, octet);
-                switch (id)
+                MkvSegment segment = m_segments[0];
+
+                int octet;
+                while ((octet = input.ReadByte()) != -1)
                 {
-                case 0x2ad7b1:	
-                    segment.Timescale = EBML.ReadUnsigned (input);
-                    m_read_segment_info = true;
-                    break;
-                case 0x4461:	segment.Date = EBML.ReadDate (input); break;
-                case 0x4489:	segment.Duration = EBML.ReadFloat (input); break;
-                case 0x4d80:	segment.MuxApp = EBML.ReadString (input); break;
-                case 0x5741:	segment.WriteApp = EBML.ReadString (input); break;
-                case 0x7ba9:	segment.Title = EBML.ReadString (input); break;
-                case 0x73a4:	segment.Uid = EBML.ReadString (input); break;
-                case 0x7384:	segment.Filename = EBML.ReadString (input); break;
-                case 0x3cb923:
-                case 0x3c83ab:
-                case 0x3eb923:
-                case 0x3e83bb:
-                case 0x4444:
-                case 0x6924:
-                case 0x69fc:
-                case 0x69bf:
-                case 0x69a5:
-                    if (_Trace)
-                        Console.Error.WriteLine ("... id {0:x04}", id);
-                    EBML.SkipData (input);
-                    break;
-                default:
-                case 0xec:  EBML.SkipData (input); break;
-                case 0xbf:	EBML.ReadCRC32 (input); break;
+                    uint id = EBML.ReadID (input, octet);
+                    switch (id)
+                    {
+                    case 0x2ad7b1:	
+                        segment.Timescale = EBML.ReadUnsigned (input);
+                        m_read_segment_info = true;
+                        break;
+                    case 0x4461:	segment.Date = EBML.ReadDate (input); break;
+                    case 0x4489:	segment.Duration = EBML.ReadFloat (input); break;
+                    case 0x4d80:	segment.MuxApp = EBML.ReadString (input); break;
+                    case 0x5741:	segment.WriteApp = EBML.ReadString (input); break;
+                    case 0x7ba9:	segment.Title = EBML.ReadString (input); break;
+                    case 0x73a4:	segment.Uid = EBML.ReadString (input); break;
+                    case 0x7384:	segment.Filename = EBML.ReadString (input); break;
+                    case 0x3cb923:
+                    case 0x3c83ab:
+                    case 0x3eb923:
+                    case 0x3e83bb:
+                    case 0x4444:
+                    case 0x6924:
+                    case 0x69fc:
+                    case 0x69bf:
+                    case 0x69a5:
+                        if (_Trace)
+                            Console.Error.WriteLine ("... id {0:x04}", id);
+                        EBML.SkipData (input);
+                        break;
+                    default:
+                    case 0xec:  EBML.SkipData (input); break;
+                    case 0xbf:	EBML.ReadCRC32 (input); break;
+                    }
                 }
             }
         }
@@ -840,7 +843,8 @@ namespace Rnd.Matroska
                 if (id == 0xae)
                 {
                     int size = (int)EBML.ReadSize (m_map);
-                    ParseTrackData (LocalStream (size));
+                    using (var input = LocalStream (size))
+                        ParseTrackData (input);
                     return true;
                 }
                 return false;
@@ -964,30 +968,31 @@ namespace Rnd.Matroska
             bool got_name = false, got_mime = false, got_data = false, got_uid = false;
 
             long map_offset = m_map.Position;
-            var buf = LocalStream ((int)size);
-
-            int octet;
-            while ((octet = buf.ReadByte()) != -1)
+            using (var buf = LocalStream ((int)size))
             {
-                uint id = EBML.ReadID (buf, octet);
-                switch (id)
+                int octet;
+                while ((octet = buf.ReadByte()) != -1)
                 {
-                default:
-                case 0xec:	    EBML.SkipData (buf); break;
-                case 0xbf:	    EBML.ReadCRC32 (buf); break;
-                case 0x466e:    file.Name       = EBML.ReadString (buf); got_name = true; break;
-                case 0x467e:    file.Description= EBML.ReadString (buf); break;
-                case 0x4660:    file.MimeType   = EBML.ReadString (buf); got_mime = true; break;
-                case 0x465c:
-                                file.Size       = EBML.ReadSize (buf);
-                                file.Offset     = map_offset + buf.Position;
-                                buf.Seek ((long)file.Size, SeekOrigin.Current);
-                                got_data = true;
-                                break;
-                case 0x46ae:    file.Uid        = EBML.ReadUInt (buf); got_uid = true; break;
-                case 0x4675:    file.Referral   = EBML.ReadString (buf); break;
-                case 0x4661:    file.StartTime  = EBML.ReadUnsigned (buf); break;
-                case 0x4662:    file.EndTime    = EBML.ReadUnsigned (buf); break;
+                    uint id = EBML.ReadID (buf, octet);
+                    switch (id)
+                    {
+                    default:
+                    case 0xec:	    EBML.SkipData (buf); break;
+                    case 0xbf:	    EBML.ReadCRC32 (buf); break;
+                    case 0x466e:    file.Name       = EBML.ReadString (buf); got_name = true; break;
+                    case 0x467e:    file.Description= EBML.ReadString (buf); break;
+                    case 0x4660:    file.MimeType   = EBML.ReadString (buf); got_mime = true; break;
+                    case 0x465c:
+                                    file.Size       = EBML.ReadSize (buf);
+                                    file.Offset     = map_offset + buf.Position;
+                                    buf.Seek ((long)file.Size, SeekOrigin.Current);
+                                    got_data = true;
+                                    break;
+                    case 0x46ae:    file.Uid        = EBML.ReadUInt (buf); got_uid = true; break;
+                    case 0x4675:    file.Referral   = EBML.ReadString (buf); break;
+                    case 0x4661:    file.StartTime  = EBML.ReadUnsigned (buf); break;
+                    case 0x4662:    file.EndTime    = EBML.ReadUnsigned (buf); break;
+                    }
                 }
             }
             if (got_name && got_mime && got_data && got_uid)
