@@ -154,4 +154,29 @@ namespace Rnd.Shell
             return result != 0? new Nullable<SHFILEINFO> (info): null;
         }
     }
+
+    /// <summary>
+    /// Wrapper around MoveFileEx WINAPI call.
+    /// </summary>
+    class File
+    {
+        [DllImport("kernel32.dll", EntryPoint="MoveFileExW", SetLastError=true, CharSet=CharSet.Unicode)]
+        public static extern bool MoveFileEx (string lpExistingFileName, string lpNewFileName, MoveFileFlags dwFlags);
+
+        [Flags]
+        public enum MoveFileFlags : uint
+        {
+            ReplaceExisting         = 0x00000001,
+            CopyAllowed             = 0x00000002,
+            DelayUntilReboot        = 0x00000004,
+            WriteThrough            = 0x00000008,
+            CreateHardlink          = 0x00000010,
+            FailIfNotTrackable      = 0x00000020
+        }
+
+        public static bool Rename (string szFrom, string szTo)
+        {
+            return MoveFileEx (szFrom, szTo, MoveFileFlags.ReplaceExisting);
+        }
+    }
 }
