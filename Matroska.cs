@@ -42,6 +42,15 @@ namespace Rnd.Matroska
     /// </summary>
     class EBMLParser
     {
+        public delegate bool SizeChecker (ulong value);
+        /// <summary>
+        /// Delegate that parses EBML stream <paramref name="buf"/> in context of
+        /// specified <paramref name="id"/>.
+        /// If delegate doesn't know how to parse stream it should return false, leaving stream
+        /// position intact.
+        /// If parse somehow succeeded, delegate should return true, leaving stream position right
+        /// after all parsed data.
+        /// <summary>
         public delegate bool SectionParser (Stream buf, uint id);
 
         public EBMLParser ()
@@ -55,9 +64,13 @@ namespace Rnd.Matroska
             DocTypeReadVersion  = new Checked<uint>(1);
         }
 
+        /// <summary>Convenient size checkers</summary>
+        public bool LongChecker (ulong x) { return x <= (ulong)long.MaxValue; }
+        public bool IntChecker  (ulong x) { return x <= (ulong)int.MaxValue; }
+
         /// <returns>
         /// Number of leading 0-bits in <paramref name="mask"/>, starting at the most significant bit
-        ///	position, or -1 if there's no 1-bits in <paramref name="mask"/>.
+        /// position, or -1 if there's no 1-bits in <paramref name="mask"/>.
         /// </returns>
         public static int BitScanMSB (uint mask)
         {
@@ -79,6 +92,10 @@ namespace Rnd.Matroska
             return index == -1? -1: index - 24;
         }
 
+        /// <summary>
+        /// Read EBML ID sequence from stream <paramref="buf"/>, using
+        /// <paramref="octet"/> as a first byte of sequence.
+        /// </summary>
         public uint ReadID (Stream buf, int octet)
         {
             if (octet != -1)
@@ -100,7 +117,12 @@ namespace Rnd.Matroska
         {
             return ReadID (buf, buf.ReadByte());
         }
-        public ulong ReadSize (Stream buf)
+
+        /// <summary>
+        /// Read EBML size sequence from stream <paramref="buf"/>, checking
+        /// obtained size using <paramref="check_size"/> delegate.
+        /// </summary>
+        public ulong ReadSize (Stream buf, SizeChecker check_size)
         {
             int octet = buf.ReadByte();
             if (octet != -1)
@@ -115,13 +137,21 @@ namespace Rnd.Matroska
 
                 if (octet != -1)
                 {
-                    if (vint <= (ulong)long.MaxValue)
+                    if (check_size (vint))
                         return vint;
                     else
-                        throw new EBML_Exception ("EBML VINT value too big");
+                        throw new EBML_Exception ("unsupported data size");
                 }
             }
             throw new EBML_Exception ("premature end of file");
+        }
+        /// <summary>
+        /// Read EBML size sequence from stream <paramref="buf"/>, using
+        /// EBML.LongChecker delegate for constraints check.
+        /// </summary>
+        public ulong ReadSize (Stream buf)
+        {
+            return ReadSize (buf, LongChecker);
         }
         public void SkipData (Stream buf)
         {
@@ -133,11 +163,12 @@ namespace Rnd.Matroska
             SkipData (buf); // ignore crc
             return 0;
         }
+        /// <summary>
+        /// Read unsigned integer data from EBML stream <paramref="buf"/>.
+        /// </summary>
         public ulong ReadUnsigned (Stream buf)
         {
-            uint sz = (uint)ReadSize (buf);
-            if (sz > 8)
-                throw new EBML_Exception ("invalid unsigned int data");
+            uint sz = (uint)ReadSize (buf, x => x <= 8);
             ulong num = 0;
             int octet = 0;
             while (sz-- != 0)
@@ -148,21 +179,38 @@ namespace Rnd.Matroska
         }
         public uint ReadUInt (Stream buf)
         {
-            return (uint)ReadUnsigned (buf);
+            ulong val = ReadUnsigned (buf);
+            if (val > (ulong)uint.MaxValue)
+                throw new EBML_Exception ("UINT32 value too big");
+            return (uint)val;
         }
+        /// <summary>
+        /// Read signed integer data from EBML stream <paramref="buf"/>.
+        /// </summary>
         public long ReadSigned (Stream buf)
         {
-            uint sz = (uint)ReadSize (buf);
-            if (sz == 0 || sz > 8)
-                throw new EBML_Exception ("invalid signed int data");
+            uint sz = (uint)ReadSize (buf, x => x > 0 && x <= 8);
             int octet = buf.ReadByte();
             long num = (sbyte)octet;
             while (--sz != 0)
                 num = (num << 8) | (byte)(octet = buf.ReadByte());
             if (octet == -1)
-            throw new EBML_Exception ("premature end of file");
+                throw new EBML_Exception ("premature end of file");
             return (num);
         }
+        /// <summary>
+        /// Read boolean value from EBML stream <paramref="buf"/>.
+        /// </summary>
+        public bool ReadBool (Stream buf)
+        {
+            return ReadUnsigned (buf) != 0;
+        }
+        /// <summary>
+        /// Read DateTime value from EBML stream <paramref="buf"/>.
+        /// </summary>
+        /// <remarks>Note that value precision is cut by 100 since DateTime
+        /// class measures time in 100ns intervals while EBML stores date
+        /// values in nanoseconds offset from 2001-01-01.</remarks>
         public DateTime ReadDate (Stream buf)
         {
             long nanosec = ReadSigned (buf);
@@ -170,25 +218,30 @@ namespace Rnd.Matroska
             DateTime date = new DateTime (2001, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc);
             return date.AddTicks (nanosec/100);
         }
+        /// <summary>
+        /// Read binary data from EBML stream <paramref="buf"/>.
+        /// </summary>
         public byte[] ReadBinary (Stream buf)
         {
-            ulong sz = ReadSize (buf);
-            if (sz > (ulong)int.MaxValue)
-                throw new EBML_Exception ("binary data too long");
+            ulong sz = ReadSize (buf, IntChecker);
             byte[] data = new byte[sz];
             buf.Read (data, 0, (int)sz);
             return data;
         }
+        /// <summary>
+        /// Read UTF-8 string from EBML stream <paramref="buf"/>.
+        /// </summary>
         public string ReadString (Stream buf)
         {
             return System.Text.Encoding.UTF8.GetString (ReadBinary (buf));
         }
 
+        /// <summary>
+        /// Read floating point number from EBML stream <paramref="buf"/>.
+        /// </summary>
         public double ReadFloat (Stream buf)
         {
-            int sz = (int)ReadSize (buf);
-            if (sz != 4 && sz != 8)
-                throw new EBML_Exception ("invalid float data");
+            int sz = (int)ReadSize (buf, x => x == 4 || x == 8);
 
             byte[] data = new byte[sz];
             for (int i = sz-1; i >= 0; --i)
@@ -200,10 +253,13 @@ namespace Rnd.Matroska
                 return BitConverter.ToDouble (data, 0);
         }
 
+        /// <summary>
+        /// Parse EBML stream <paramref="buf"/> using delegate <paramref="parser"/>.
+        /// </summary>
         public void ParseSection (Stream buf, SectionParser parser)
         {
             ulong section_size = ReadSize (buf);
-            long section_end = buf.Position + (long)section_size;
+            long section_end = checked (buf.Position + (long)section_size);
             int octet;
             while ((octet = buf.ReadByte()) != -1 && buf.Position < section_end)
             {
@@ -214,8 +270,8 @@ namespace Rnd.Matroska
                     if (parser (buf, id)) break;
                     SkipData (buf);
                     break;
-                case 0xec:	SkipData (buf); break;
-                case 0xbf:	ReadCRC32 (buf); break;
+                case 0xec:  SkipData (buf); break;
+                case 0xbf:  ReadCRC32 (buf); break;
                 }
             }
             buf.Position = section_end;
@@ -223,11 +279,11 @@ namespace Rnd.Matroska
 
         public Checked<uint>    Version;
         public Checked<uint>    ReadVersion;
-        public Checked<uint>	MaxIDLength;
-        public Checked<uint>	MaxSizeLength;
-        public Checked<string>	DocType;
-        public Checked<uint>	DocTypeVersion;
-        public Checked<uint>	DocTypeReadVersion;
+        public Checked<uint>    MaxIDLength;
+        public Checked<uint>    MaxSizeLength;
+        public Checked<string>  DocType;
+        public Checked<uint>    DocTypeVersion;
+        public Checked<uint>    DocTypeReadVersion;
     }
 
     /// <summary>
@@ -243,18 +299,18 @@ namespace Rnd.Matroska
             get { return m_value; }
             set
             {
-                m_modified = true;
+                Modified = true;
                 m_value = value;
             }
         }
         /// <summary>
         /// Returns true if value was modified since last reset, false otherwise.
         /// </summary>
-        public bool Modified { get { return m_modified; } }
+        public bool Modified { get; private set; }
 
         public Checked ()
         {
-            m_modified = false;
+            Modified = false;
         }
 
         public Checked (T val)
@@ -268,7 +324,7 @@ namespace Rnd.Matroska
         public void Reset(T val)
         {
             m_value = val;
-            m_modified = false;
+            Modified = false;
         }
 
         public static implicit operator T (Checked<T> v)
@@ -282,7 +338,6 @@ namespace Rnd.Matroska
         }
 
         private T       m_value;
-        private bool    m_modified;
     }
 
     /// <summary>
@@ -296,7 +351,7 @@ namespace Rnd.Matroska
         Logo        = 0x10,
         Subtitle    = 0x11,
         Buttons     = 0x12,
-        Conrol      = 0x20,
+        Control     = 0x20,
     };
 
     /// <summary>
@@ -307,93 +362,105 @@ namespace Rnd.Matroska
         public uint     Uid             { get; set; }
         public uint     Type            { get; set; }
         public bool     Enabled         { get; set; }
-        public bool		Default         { get; set; }
-        public bool		Forced          { get; set; }
-        public bool		Lacing          { get; set; }
-        public uint		FrameDuration   { get; set; }
-        public double	Timescale       { get; set; }
-        public string	Name            { get; set; }
-        public string	Lang            { get; set; }
-        public string	CodecID         { get; set; }
-        public string	CodecName       { get; set; }
-        public byte[]	CodecPrivate    { get; set; }
+        public bool     Default         { get; set; }
+        public bool     Forced          { get; set; }
+        public bool     Lacing          { get; set; }
+        public uint     FrameDuration   { get; set; }
+        public double   Timescale       { get; set; }
+        public string   Name            { get; set; }
+        public string   Lang            { get; set; }
+        public string   CodecID         { get; set; }
+        public string   CodecName       { get; set; }
+        public byte[]   CodecPrivate    { get; set; }
 
         // Video settings
         //
-        public bool		Interlaced      { get; set; }
-        public uint		StereoMode      { get; set; }
-        public uint		Width_px        { get; set; }
-        public uint	    Height_px       { get; set; }
-        public uint		CropBottom      { get; set; }
-        public uint		CropTop         { get; set; }
-        public uint		CropLeft        { get; set; }
-        public uint		CropRight       { get; set; }
-        public uint		DisplayWidth    { get; set; }
-        public uint		DisplayHeight   { get; set; }
-        public uint		DisplayUnit     { get; set; }
-        public uint		AspectType      { get; set; }
+        public bool     Interlaced      { get; set; }
+        public uint     StereoMode      { get; set; }
+        public uint     Width_px        { get; set; }
+        public uint     Height_px       { get; set; }
+        public uint     CropBottom      { get; set; }
+        public uint     CropTop         { get; set; }
+        public uint     CropLeft        { get; set; }
+        public uint     CropRight       { get; set; }
+        public uint     DisplayWidth    { get; set; }
+        public uint     DisplayHeight   { get; set; }
+        public uint     DisplayUnit     { get; set; }
+        public uint     AspectType      { get; set; }
 
         // Audio settings
         //
-        public double	SampleFreq      { get; set; }
-        public double	OutSampleFreq   { get; set; }
-        public uint		Channels        { get; set; }
-        public uint		BitDepth        { get; set; }
+        public double   SampleFreq      { get; set; }
+        public double   OutSampleFreq   { get; set; }
+        public uint     Channels        { get; set; }
+        public uint     BitDepth        { get; set; }
     }
 
     class MkvSegment
     {
-    	public long		    Offset      { get; set; }
-        public double		Duration    { get; set; }
-        public ulong		Timescale   { get; set; }
+        public long         Offset      { get; set; }
+        public ulong        Size        { get; set; }
+        public double       Duration    { get; set; }
+        public ulong        Timescale   { get; set; }
         public DateTime     Date        { get; set; }
-        public string		Uid         { get; set; }
-        public string		Filename    { get; set; }
-        public string		Title       { get; set; }
-        public string		MuxApp      { get; set; }
-        public string		WriteApp    { get; set; }
+        public string       Uid         { get; set; }
+        public string       Filename    { get; set; }
+        public string       Title       { get; set; }
+        public string       MuxApp      { get; set; }
+        public string       WriteApp    { get; set; }
+
+        public MkvSegment ()
+        {
+            Offset = 0;
+            Size = 0;
+            Duration = 0;
+            Timescale = 1000000;
+        }
     };
 
     class MkvBlock
     {
-        public uint 		TrackNumber { get; set; }
-        public long	        Timecode    { get; set; }
-        public ulong		Duration    { get; set; }
-        public byte[]		Data        { get; set; }
-        public uint			Size        { get; set; }
-//        public MkvExtractor		extractor;
+        public uint         TrackNumber { get; set; }
+        public long         Timecode    { get; set; }
+        public ulong        Duration    { get; set; }
+        public byte[]       Data        { get; set; }
+        public uint         Size        { get; set; }
+//        public MkvExtractor       extractor;
     };
 
     class MkvAttachment
     {
-        public string		Name        { get; set; }
-        public string		Description { get; set; }
-        public string		MimeType    { get; set; }
-        public uint		    Uid         { get; set; }
-        public string		Referral    { get; set; }
-        public ulong		StartTime   { get; set; }
-        public ulong		EndTime     { get; set; }
-        public long		    Offset      { get; set; }
-        public ulong		Size        { get; set; }
+        public string       Name        { get; set; }
+        public string       Description { get; set; }
+        public string       MimeType    { get; set; }
+        public uint         Uid         { get; set; }
+        public string       Referral    { get; set; }
+        public ulong        StartTime   { get; set; }
+        public ulong        EndTime     { get; set; }
+        public long         Offset      { get; set; }
+        public ulong        Size        { get; set; }
     };
 
     enum EBML_ID : uint
     {
-        Chapters 	= 0x1043a770,
-        MetaSeek	= 0x114d9b74,
-        Tags		= 0x1254c367,
-        SegmentInfo	= 0x1549a966,
-        Track	    = 0x1654ae6b,
-        Segment	    = 0x18538067,
-        Attachment	= 0x1941a469,
-        Header	    = 0x1a45dfa3,
-        Signature	= 0x1b538667,
-        CueingData	= 0x1c53bb6b,
-        Cluster	    = 0x1f43b675,
+        Chapters    = 0x1043a770,
+        MetaSeek    = 0x114d9b74,
+        Tags        = 0x1254c367,
+        SegmentInfo = 0x1549a966,
+        Track       = 0x1654ae6b,
+        Segment     = 0x18538067,
+        Attachment  = 0x1941a469,
+        Header      = 0x1a45dfa3,
+        Signature   = 0x1b538667,
+        CueingData  = 0x1c53bb6b,
+        Cluster     = 0x1f43b675,
         SkipData    = 0xec,
         CRC32       = 0xbf,
     };
 
+    /// <summary>
+    /// Matroska parser class.
+    /// </summary>
     class Reader : IDisposable
     {
         public const uint HeaderThreshold = 0x4000;
@@ -403,23 +470,24 @@ namespace Rnd.Matroska
         private List<MkvSegment>            m_segments = new List<MkvSegment>();
         private List<MkvAttachment>         m_attachment = new List<MkvAttachment>();
         private Dictionary<uint, MkvTrack>  m_tracks = new Dictionary<uint,MkvTrack>();
-        private EBMLParser                  m_ebml;
+
         /// <summary>
         /// File offset of the first data cluster.
         /// </summary>
-        private long                        m_first_cluster;
+        private long                        m_first_cluster = 0;
         /// <summary>
         /// True if segment info has been read.
         /// </summary>
-        private bool                        m_read_segment_info;
+        private bool                        m_read_segment_info = false;
+        /// <summary>
+        /// True if file has attachments section.
+        /// </summary>
+        private bool                        m_have_attachments = false;
 
         public delegate bool SectionParser (uint id);
 
-        public bool                         _Trace { get; set; }
-        public EBMLParser                   EBML
-        {
-            get { return m_ebml; }
-        }
+        public bool                         _Trace  { get; set; }
+        public EBMLParser                   EBML    { get; private set; }
         public MkvSegment                   Segment
         {
             get { return m_segments[0]; }
@@ -430,7 +498,12 @@ namespace Rnd.Matroska
         }
         public List<MkvAttachment>          Attachments
         {
-            get { return m_attachment; }
+            get
+            {
+                if (m_have_attachments && m_attachment.Count == 0)
+                    LoadAttachments();
+                return m_attachment;
+            }
         }
         public double                       SegmentDuration
         {
@@ -477,169 +550,6 @@ namespace Rnd.Matroska
             Dispose (false);
         }
 
-        /// <summary>
-        /// Look for Matroska signature in the first HeaderThreshold bytes
-        /// of the specfied stream.
-        /// </summary>
-        /// <remarks>Search is also aborted whenever soft End-of-file (0x1a) encountered.</remarks>
-        /// <returns>True if Matroska signature was found, false otherwise.</returns>
-        public static bool FindHeader (Stream buf)
-        {
-            int ch;
-            for (uint count = 0; count < HeaderThreshold; ++count)
-            {
-                ch = buf.ReadByte();
-                if (ch == 0x1a)
-                    return (buf.ReadByte() == 0x45 &&
-                            buf.ReadByte() == 0xdf &&
-                            buf.ReadByte() == 0xa3);
-                if (ch == -1)
-                    break;
-            }
-            return false;
-        }
-
-        private void InitDefaults ()
-        {
-            m_ebml = new EBMLParser();
-
-            m_segments.Clear();
-            m_segments.Add (new MkvSegment());
-            m_segments[0].Offset = 0;
-            m_segments[0].Duration = 0;
-            m_segments[0].Timescale = 1000000;
-            m_first_cluster = 0;
-            m_read_segment_info = false;
-        }
-
-        /// <summary>
-        /// Make sure there's at least <paramref name="size"/> bytes available for reading.
-        /// </summary>
-        private void StreamReserve (int size)
-        {
-            if (m_map.Position + size > m_map.Length)
-                throw new EBML_Exception ("Premature end of file");
-        }
-        private void StreamReserve (ulong size)
-        {
-            if (m_map.Position + (long)size > m_map.Length)
-                throw new EBML_Exception ("Premature end of file");
-        }
-
-        private void ParseHeader ()
-        {
-            int header_size = (int)EBML.ReadSize (m_map);
-            StreamReserve (header_size);
-
-            for (long header_end = m_map.Position + header_size; m_map.Position < header_end; )
-            {
-                uint id = EBML.ReadID (m_map);
-                switch (id)
-                {
-                case 0xec:  	EBML.SkipData (m_map); break;
-                case 0xbf:	    EBML.ReadCRC32 (m_map); break;
-                case 0x4286:	EBML.Version.Value = EBML.ReadUInt (m_map); break;
-                case 0x42f7:	EBML.ReadVersion.Value = EBML.ReadUInt (m_map); break;
-                case 0x42f2:	EBML.MaxIDLength.Value = EBML.ReadUInt (m_map); break;
-                case 0x42f3:	EBML.MaxSizeLength.Value = EBML.ReadUInt (m_map); break;
-                case 0x4287:	EBML.DocTypeVersion.Value = EBML.ReadUInt (m_map); break;
-                case 0x4285:	EBML.DocTypeReadVersion.Value = EBML.ReadUInt (m_map); break;
-                case 0x4282:	EBML.DocType.Value = EBML.ReadString (m_map); break;
-                default:        throw new EBML_Exception ("Invalid header data");
-                }
-            }
-            if (!(EBML.DocTypeVersion.Modified && EBML.DocTypeReadVersion.Modified
-                  && EBML.DocType.Modified))
-                throw new EBML_Exception ("Incomplete header");
-        }
-
-        private void ParseCore ()
-        {
-            if (EBML.DocType != "matroska")
-                throw new EBML_Exception ("unsupported DocType");
-            if (EBML.ReadVersion > 1)
-                throw new EBML_Exception ("incompatible EBML version");
-            if (EBML.DocTypeReadVersion > 3)
-                throw new EBML_Exception ("incompatible DocType version");
-            if (EBML.MaxIDLength > 4)
-                throw new EBML_Exception ("unsupported max id length");
-            if (EBML.MaxSizeLength > 8)
-                throw new EBML_Exception ("unsupported max data size");
-
-            int octet;
-            while ((octet = m_map.ReadByte()) != -1 && m_first_cluster == 0)
-            {
-                long off = m_map.Position;
-                uint id = EBML.ReadID (m_map, octet);
-                switch ((EBML_ID)id)
-                {
-                default:
-                    if (_Trace)
-                        Console.Error.WriteLine ("> unknown section id {0:x04} @ {1:x8}, skipped", id, off);
-                    EBML.SkipData (m_map);
-                    break;
-                case EBML_ID.SkipData:      EBML.SkipData (m_map); break;
-                case EBML_ID.CRC32:         EBML.ReadCRC32 (m_map); break;
-                case EBML_ID.Header:        ParseHeader(); break;
-                case EBML_ID.Segment:
-                    {
-                        if (m_segments[0].Offset != 0)
-                        {
-                            if (_Trace)
-                                Console.Error.WriteLine ("> MKV multiple segments not supported");
-                            EBML.SkipData (m_map);
-                            return;
-                        }
-                        ulong segment_size = EBML.ReadSize (m_map);
-                        m_segments[0].Offset = m_map.Position;
-                        if (_Trace)
-                            Console.WriteLine (". new segment @ {0:x8} [{1} bytes]",
-                                m_segments[0].Offset, segment_size);
-                        break;
-                    }
-                case EBML_ID.MetaSeek:	    ParseMetaSeek(); break;
-                case EBML_ID.SegmentInfo:	ParseSegmentInfo(); break;
-                case EBML_ID.Track:		    ParseTrack(); break;
-                case EBML_ID.CueingData:	ParseCueData(); break;
-                case EBML_ID.Attachment:	ParseAttachment(); break;
-                case EBML_ID.Chapters:
-                    if (_Trace)
-                        Console.WriteLine (".. chapter data @ {0:x8}", off);
-                    EBML.SkipData (m_map);
-                    /*
-                    EBML.parse_section ([=] (id_type id) -> bool {
-                        if (id == 0x45b9)
-                        {
-                            size_type size = EBML.read_size (m_map);
-                            EBML.reserve (size);
-                            mkv_parse_chapter_data (m_map.gdata(), size);
-                            m_map.pubseekoff (size, std::ios::cur);
-                            return true;
-                        }
-                        return false;
-                    }, default_error_handler());
-                    */
-                    break;
-                case EBML_ID.Cluster:
-                    if (_Trace)
-                        Console.WriteLine (".. first cluster data @ {0:x8}", off);
-                    m_first_cluster = off;
-                    return;
-                }
-            }
-        }
-
-        public bool SeekTo (EBML_ID id, int segment = 0)
-        {
-            long offset;
-            if (m_seek.TryGetValue ((uint)id, out offset))
-            {
-                m_map.Position = m_segments[segment].Offset + offset;
-                return EBML.ReadID (m_map) == (uint)id;
-            }
-            return false;
-        }
-
         private void Parse ()
         {
             if (!FindHeader (m_map))
@@ -662,15 +572,161 @@ namespace Rnd.Matroska
                 if (m_tracks.Count == 0 && SeekTo (EBML_ID.Track))
                     ParseTrack();
 
-                if (m_attachment.Count == 0 && SeekTo (EBML_ID.Attachment))
-                    ParseAttachment();
+                if (!m_have_attachments && m_seek.ContainsKey ((uint)EBML_ID.Attachment))
+                    m_have_attachments = true;
             }
+        }
+
+        /// <summary>
+        /// Look for Matroska signature in the first HeaderThreshold bytes
+        /// of the specfied stream.
+        /// </summary>
+        /// <returns>True if Matroska signature was found, false otherwise.</returns>
+        /// <remarks>Search is also aborted whenever soft End-of-file (0x1a) encountered.</remarks>
+        public static bool FindHeader (Stream buf)
+        {
+            int ch;
+            for (uint count = 0; count < HeaderThreshold; ++count)
+            {
+                ch = buf.ReadByte();
+                if (ch == 0x1a)
+                    return (buf.ReadByte() == 0x45 &&
+                            buf.ReadByte() == 0xdf &&
+                            buf.ReadByte() == 0xa3);
+                if (ch == -1)
+                    break;
+            }
+            return false;
+        }
+
+        private void InitDefaults ()
+        {
+            EBML = new EBMLParser();
+
+            m_segments.Clear();
+            m_segments.Add (new MkvSegment());
+        }
+
+        /// <summary>
+        /// Make sure there's at least <paramref name="size"/> bytes available for reading.
+        /// </summary>
+        private void StreamReserve (int size)
+        {
+            if (size > m_map.Length || m_map.Position > m_map.Length - size)
+                throw new EBML_Exception ("Premature end of file");
+        }
+        private void StreamReserve (ulong size)
+        {
+            if (size > (ulong)long.MaxValue || (long)size > m_map.Length || m_map.Position > m_map.Length - (long)size)
+                throw new EBML_Exception ("Premature end of file");
+        }
+
+        private void ParseHeader ()
+        {
+            int header_size = (int)EBML.ReadSize (m_map, EBML.IntChecker);
+            StreamReserve (header_size);
+
+            for (long header_end = m_map.Position + header_size; m_map.Position < header_end; )
+            {
+                uint id = EBML.ReadID (m_map);
+                switch (id)
+                {
+                case 0xec:      EBML.SkipData (m_map); break;
+                case 0xbf:      EBML.ReadCRC32 (m_map); break;
+                case 0x4286:    EBML.Version.Value = EBML.ReadUInt (m_map); break;
+                case 0x42f7:    EBML.ReadVersion.Value = EBML.ReadUInt (m_map); break;
+                case 0x42f2:    EBML.MaxIDLength.Value = EBML.ReadUInt (m_map); break;
+                case 0x42f3:    EBML.MaxSizeLength.Value = EBML.ReadUInt (m_map); break;
+                case 0x4287:    EBML.DocTypeVersion.Value = EBML.ReadUInt (m_map); break;
+                case 0x4285:    EBML.DocTypeReadVersion.Value = EBML.ReadUInt (m_map); break;
+                case 0x4282:    EBML.DocType.Value = EBML.ReadString (m_map); break;
+                default:        throw new EBML_Exception ("Invalid header data");
+                }
+            }
+            if (!(EBML.DocTypeVersion.Modified && EBML.DocTypeReadVersion.Modified
+                  && EBML.DocType.Modified))
+                throw new EBML_Exception ("Incomplete header");
+        }
+
+        private void ParseCore ()
+        {
+            if (EBML.DocType != "matroska")
+                throw new EBML_Exception ("unsupported DocType");
+            if (EBML.ReadVersion > 1)
+                throw new EBML_Exception ("incompatible EBML version");
+            if (EBML.DocTypeReadVersion > 3)
+                throw new EBML_Exception ("incompatible DocType version");
+            if (EBML.MaxIDLength > 4)
+                throw new EBML_Exception ("unsupported max id length");
+            if (EBML.MaxSizeLength > 8)
+                throw new EBML_Exception ("unsupported max data size");
+
+            int octet;
+            while (m_first_cluster == 0 && (octet = m_map.ReadByte()) != -1)
+            {
+                long off = m_map.Position-1;
+                uint id = EBML.ReadID (m_map, octet);
+                switch ((EBML_ID)id)
+                {
+                default:
+                    if (_Trace)
+                        Console.Error.WriteLine ("> unknown section id {0:x04} @ {1:x8}, skipped", id, off);
+                    EBML.SkipData (m_map);
+                    break;
+                case EBML_ID.SkipData:      EBML.SkipData (m_map); break;
+                case EBML_ID.CRC32:         EBML.ReadCRC32 (m_map); break;
+                case EBML_ID.Header:        ParseHeader(); break;
+                case EBML_ID.Segment:
+                    {
+                        if (m_segments[0].Offset != 0)
+                        {
+                            if (_Trace)
+                                Console.Error.WriteLine ("> MKV multiple segments not supported");
+                            EBML.SkipData (m_map);
+                            return;
+                        }
+                        m_segments[0].Size = EBML.ReadSize (m_map);
+                        m_segments[0].Offset = m_map.Position;
+                        if (_Trace)
+                            Console.WriteLine (". new segment @ {0:x8} [{1} bytes]",
+                                m_segments[0].Offset, m_segments[0].Size);
+                        break;
+                    }
+                case EBML_ID.MetaSeek:      ParseMetaSeek(); break;
+                case EBML_ID.SegmentInfo:   ParseSegmentInfo(); break;
+                case EBML_ID.Track:         ParseTrack(); break;
+                case EBML_ID.CueingData:    ParseCueData(); break;
+                case EBML_ID.Chapters:      ParseChapters(); break;
+                case EBML_ID.Cluster:
+                    if (_Trace)
+                        Console.WriteLine (".. first cluster data @ {0:x8}", off);
+                    m_first_cluster = off;
+                    break;
+
+                case EBML_ID.Attachment:
+                    m_seek[id] = off - m_segments[0].Offset;
+                    m_have_attachments = true;
+                    EBML.SkipData (m_map);
+                    break;
+                }
+            }
+        }
+
+        public bool SeekTo (EBML_ID id, int segment = 0)
+        {
+            long offset;
+            if (m_seek.TryGetValue ((uint)id, out offset))
+            {
+                m_map.Position = m_segments[segment].Offset + offset;
+                return EBML.ReadID (m_map) == (uint)id;
+            }
+            return false;
         }
 
         void ParseSection (SectionParser parser)
         {
             ulong section_size = EBML.ReadSize (m_map);
-            long section_end = m_map.Position + (long)section_size;
+            long section_end = checked (m_map.Position + (long)section_size);
             while (m_map.Position < section_end)
             {
                 long off = m_map.Position;
@@ -682,8 +738,8 @@ namespace Rnd.Matroska
                     ErrorHandler (id, off);
                     EBML.SkipData (m_map);
                     break;
-                case 0xec:	EBML.SkipData (m_map); break;
-                case 0xbf:	EBML.ReadCRC32 (m_map); break;
+                case 0xec:  EBML.SkipData (m_map); break;
+                case 0xbf:  EBML.ReadCRC32 (m_map); break;
                 }
             }
             m_map.Position = section_end;
@@ -722,8 +778,8 @@ namespace Rnd.Matroska
                         Console.Error.WriteLine ("> unknown id {0:x00} @ {1:x8}", id, off);
                     EBML.SkipData (input);
                     break;
-                case 0xec:	EBML.SkipData (input); break;
-                case 0xbf:	EBML.ReadCRC32 (input); break;
+                case 0xec:  EBML.SkipData (input); break;
+                case 0xbf:  EBML.ReadCRC32 (input); break;
                 case 0x53ab:
                     {
                         if (seek_id.Modified)
@@ -773,7 +829,7 @@ namespace Rnd.Matroska
             {
                 if (id == 0x4dbb)
                 {
-                    int size = (int)EBML.ReadSize (m_map);
+                    int size = (int)EBML.ReadSize (m_map, EBML.IntChecker);
                     using (var input = LocalStream (size))
                         ParseMetaseekData (input);
                     return true;
@@ -787,12 +843,12 @@ namespace Rnd.Matroska
             if (_Trace)
                 Console.WriteLine (". ParseSegmentInfo");
 
-            ulong info_size = EBML.ReadSize (m_map);
+            int info_size = (int)EBML.ReadSize (m_map, EBML.IntChecker);
             if (_Trace)
                 Console.WriteLine (".. segment info [{0} bytes]", info_size);
 
             StreamReserve (info_size);
-            using (var input = LocalStream ((int)info_size))
+            using (var input = LocalStream (info_size))
             {
                 MkvSegment segment = m_segments[0];
 
@@ -802,17 +858,17 @@ namespace Rnd.Matroska
                     uint id = EBML.ReadID (input, octet);
                     switch (id)
                     {
-                    case 0x2ad7b1:	
+                    case 0x2ad7b1:  
                         segment.Timescale = EBML.ReadUnsigned (input);
                         m_read_segment_info = true;
                         break;
-                    case 0x4461:	segment.Date = EBML.ReadDate (input); break;
-                    case 0x4489:	segment.Duration = EBML.ReadFloat (input); break;
-                    case 0x4d80:	segment.MuxApp = EBML.ReadString (input); break;
-                    case 0x5741:	segment.WriteApp = EBML.ReadString (input); break;
-                    case 0x7ba9:	segment.Title = EBML.ReadString (input); break;
-                    case 0x73a4:	segment.Uid = EBML.ReadString (input); break;
-                    case 0x7384:	segment.Filename = EBML.ReadString (input); break;
+                    case 0x4461:    segment.Date = EBML.ReadDate (input); break;
+                    case 0x4489:    segment.Duration = EBML.ReadFloat (input); break;
+                    case 0x4d80:    segment.MuxApp = EBML.ReadString (input); break;
+                    case 0x5741:    segment.WriteApp = EBML.ReadString (input); break;
+                    case 0x7ba9:    segment.Title = EBML.ReadString (input); break;
+                    case 0x73a4:    segment.Uid = EBML.ReadString (input); break;
+                    case 0x7384:    segment.Filename = EBML.ReadString (input); break;
                     case 0x3cb923:
                     case 0x3c83ab:
                     case 0x3eb923:
@@ -828,7 +884,7 @@ namespace Rnd.Matroska
                         break;
                     default:
                     case 0xec:  EBML.SkipData (input); break;
-                    case 0xbf:	EBML.ReadCRC32 (input); break;
+                    case 0xbf:  EBML.ReadCRC32 (input); break;
                     }
                 }
             }
@@ -842,7 +898,7 @@ namespace Rnd.Matroska
             {
                 if (id == 0xae)
                 {
-                    int size = (int)EBML.ReadSize (m_map);
+                    int size = (int)EBML.ReadSize (m_map, EBML.IntChecker);
                     using (var input = LocalStream (size))
                         ParseTrackData (input);
                     return true;
@@ -864,32 +920,32 @@ namespace Rnd.Matroska
                 switch (EBML.ReadID (input, octet))
                 {
                 default:
-                case 0xec: 	    EBML.SkipData (input); break;
-                case 0xbf:	    EBML.ReadCRC32 (input); break;
-                case 0xd7:	    track_number = EBML.ReadUInt (input); break;
-                case 0x73c5:	track_info.Uid = EBML.ReadUInt (input); break;
-                case 0x83:	    track_info.Type = EBML.ReadUInt (input); break;
-                case 0xb9:	    track_info.Enabled = EBML.ReadUnsigned (input) != 0; break;
-                case 0x88:	    track_info.Default = EBML.ReadUnsigned (input) != 0; break;
-                case 0x55aa:	track_info.Forced = EBML.ReadUnsigned (input) != 0; break;
-                case 0x9c:	    track_info.Lacing = EBML.ReadUnsigned (input) != 0; break;
-                case 0x23e383:	track_info.FrameDuration = EBML.ReadUInt (input); break;
-                case 0x23314f:	track_info.Timescale = EBML.ReadFloat (input); break;
-                case 0x536e:	track_info.Name = EBML.ReadString (input); break;
-                case 0x22b59c:	track_info.Lang = EBML.ReadString (input); break;
-                case 0x86:	    track_info.CodecID = EBML.ReadString (input); break;
-                case 0x258688:	track_info.CodecName = EBML.ReadString (input); break;
-                case 0x63a2:	track_info.CodecPrivate = EBML.ReadBinary (input); break;
+                case 0xec:      EBML.SkipData (input); break;
+                case 0xbf:      EBML.ReadCRC32 (input); break;
+                case 0xd7:      track_number = EBML.ReadUInt (input); break;
+                case 0x73c5:    track_info.Uid = EBML.ReadUInt (input); break;
+                case 0x83:      track_info.Type = EBML.ReadUInt (input); break;
+                case 0xb9:      track_info.Enabled = EBML.ReadBool (input); break;
+                case 0x88:      track_info.Default = EBML.ReadBool (input); break;
+                case 0x55aa:    track_info.Forced = EBML.ReadBool (input); break;
+                case 0x9c:      track_info.Lacing = EBML.ReadBool (input); break;
+                case 0x23e383:  track_info.FrameDuration = EBML.ReadUInt (input); break;
+                case 0x23314f:  track_info.Timescale = EBML.ReadFloat (input); break;
+                case 0x536e:    track_info.Name = EBML.ReadString (input); break;
+                case 0x22b59c:  track_info.Lang = EBML.ReadString (input); break;
+                case 0x86:      track_info.CodecID = EBML.ReadString (input); break;
+                case 0x258688:  track_info.CodecName = EBML.ReadString (input); break;
+                case 0x63a2:    track_info.CodecPrivate = EBML.ReadBinary (input); break;
                 case 0xe0:
                     EBML.ParseSection (input, (buf, id) =>
                     {
                         switch (id)
                         {
-                        default:	    return false;
-                        case 0x9a:	    track_info.Interlaced   = EBML.ReadUnsigned (buf) != 0; break;
+                        default:        return false;
+                        case 0x9a:      track_info.Interlaced   = EBML.ReadBool (buf); break;
                         case 0x53b8:    track_info.StereoMode   = EBML.ReadUInt (buf); break;
-                        case 0xb0:	    track_info.Width_px     = EBML.ReadUInt (buf); break;
-                        case 0xba:	    track_info.Height_px    = EBML.ReadUInt (buf); break;
+                        case 0xb0:      track_info.Width_px     = EBML.ReadUInt (buf); break;
+                        case 0xba:      track_info.Height_px    = EBML.ReadUInt (buf); break;
                         case 0x54aa:    track_info.CropBottom   = EBML.ReadUInt (buf); break;
                         case 0x54bb:    track_info.CropTop      = EBML.ReadUInt (buf); break;
                         case 0x54cc:    track_info.CropLeft     = EBML.ReadUInt (buf); break;
@@ -907,10 +963,10 @@ namespace Rnd.Matroska
                     {
                         switch (id)
                         {
-                        default:	    return false;
-                        case 0xb5:	    track_info.SampleFreq   = EBML.ReadFloat (buf); break;
+                        default:        return false;
+                        case 0xb5:      track_info.SampleFreq   = EBML.ReadFloat (buf); break;
                         case 0x78b5:    track_info.OutSampleFreq= EBML.ReadFloat (buf); break;
-                        case 0x9f:	    track_info.Channels     = EBML.ReadUInt (buf); break;
+                        case 0x9f:      track_info.Channels     = EBML.ReadUInt (buf); break;
                         case 0x6264:    track_info.BitDepth     = EBML.ReadUInt (buf); break;
                         }
                         return true;
@@ -929,6 +985,14 @@ namespace Rnd.Matroska
             EBML.SkipData (m_map);
         }
 
+        void LoadAttachments()
+        {
+            if (SeekTo (EBML_ID.Attachment))
+                ParseAttachment();
+            else if (_Trace)
+                Console.Error.Write ("> Seek to attachments section failed");
+        }
+
         void ParseAttachment()
         {
             if (_Trace)
@@ -937,8 +1001,8 @@ namespace Rnd.Matroska
             ulong att_size = EBML.ReadSize (m_map);
             if (_Trace)
                 Console.WriteLine (".. attachments [{0} bytes]", att_size);
-            StreamReserve (att_size);
 
+            StreamReserve (att_size);
             long att_end = m_map.Position + (long)att_size;
             while (m_map.Position < att_end)
             {
@@ -950,13 +1014,7 @@ namespace Rnd.Matroska
                         Console.Error.WriteLine ("> invalid attachment data id {0:x04} @ {1:x8}", id, off);
                     break;
                 }
-                ulong size = EBML.ReadSize (m_map);
-                if (size > (ulong)(att_end - m_map.Position))
-                {
-                    if (_Trace)
-                        Console.Error.WriteLine ("> invalid attachment size id {0:x04} @ {1:x8}", size, off);
-                    break;
-                }
+                ulong size = EBML.ReadSize (m_map, x => x <= (ulong)(att_end - m_map.Position));
                 ParseAttachmentData (size);
             }
             m_map.Position = att_end;
@@ -977,8 +1035,8 @@ namespace Rnd.Matroska
                     switch (id)
                     {
                     default:
-                    case 0xec:	    EBML.SkipData (buf); break;
-                    case 0xbf:	    EBML.ReadCRC32 (buf); break;
+                    case 0xec:      EBML.SkipData (buf); break;
+                    case 0xbf:      EBML.ReadCRC32 (buf); break;
                     case 0x466e:    file.Name       = EBML.ReadString (buf); got_name = true; break;
                     case 0x467e:    file.Description= EBML.ReadString (buf); break;
                     case 0x4660:    file.MimeType   = EBML.ReadString (buf); got_mime = true; break;
@@ -997,6 +1055,26 @@ namespace Rnd.Matroska
             }
             if (got_name && got_mime && got_data && got_uid)
                 m_attachment.Add (file);
+        }
+
+        public void ParseChapters()
+        {
+            if (_Trace)
+                Console.WriteLine (". ParseChapters");
+            EBML.SkipData (m_map);
+            /*
+            EBML.parse_section ([=] (id_type id) -> bool {
+                if (id == 0x45b9)
+                {
+                    size_type size = EBML.read_size (m_map);
+                    EBML.reserve (size);
+                    mkv_parse_chapter_data (m_map.gdata(), size);
+                    m_map.pubseekoff (size, std::ios::cur);
+                    return true;
+                }
+                return false;
+            }, default_error_handler());
+            */
         }
 
         private bool m_disposed = false;

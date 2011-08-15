@@ -142,7 +142,8 @@ namespace Rnd.MediaLib
         {
             Rnd.AVI.MediaInfo avi = new Rnd.AVI.MediaInfo (FilePath);
 
-            FrameSize = string.Format ("{0}x{1}", avi.Width, avi.Height);
+            if (avi.Width > 0 && avi.Height > 0)
+                FrameSize = string.Format ("{0}x{1}", avi.Width, avi.Height);
 
             double duration = avi.MicroSecPerFrame/1e6 * avi.TotalFrames;
             Duration = FormatDuration (duration);
