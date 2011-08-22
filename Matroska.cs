@@ -990,7 +990,7 @@ namespace Rnd.Matroska
             if (SeekTo (EBML_ID.Attachment))
                 ParseAttachment();
             else if (_Trace)
-                Console.Error.Write ("> Seek to attachments section failed");
+                Console.Error.WriteLine ("> Seek to attachments section failed");
         }
 
         void ParseAttachment()
