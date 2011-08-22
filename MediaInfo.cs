@@ -124,9 +124,9 @@ namespace Rnd.MediaLib
                 else if (ext == "MKV")
                     MkvFileInfo();
             }
-            catch (EBML_Exception)
+            catch (EBML_Exception X)
             {
-                Info = wpfStrings.MsgInvalidFormat;
+                Info = X.Message;
             }
             catch (InvalidFormat)
             {
